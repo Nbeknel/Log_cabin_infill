@@ -2,6 +2,7 @@ import re
 import argparse
 import os
 import random
+import math
 
 
 class LineSegment:
@@ -30,10 +31,11 @@ class MyObject:
         self.layer_z = layer_z
 
     def add_line_segment(self, line_segment: LineSegment):
-        self.current_layer.append(line_segment))
+        self.current_layer.append(line_segment)
 
 
-def intersect(segment_0: LineSegment, segment_1: LineSegment):
+def intersect(segment_0: LineSegment, segment_1: LineSegment,
+		overhang_threshold=0.5):
     # segment_0: in current layer
     # segment_1: in previous layer
     dx0 = segment_0.x1 - segment_0.x0
@@ -43,20 +45,36 @@ def intersect(segment_0: LineSegment, segment_1: LineSegment):
     dy1 = segment_1.y1 - segment_1.y0
     
     delta = dx1 * dy0 - dx0 * dy1
-    
-    # If both line segments are (nearly) parallel
-    if abs(delta) < 1e-6:
-        # Change this block
-        return False
-        
+    # Lengths of both line segments
+    r0 = math.sqrt(dx0 ** 2 + dy0 ** 2)
+    r1 = math.sqrt(dx1 ** 2 + dy1 ** 2)
+
     dx = segment_1.x0 - segment_0.x0
     dy = segment_1.y0 - segment_0.y0
     
-    t = (dx1 * dy - dy1 * dx) / delta
-    s = (dx0 * dy - dy0 * dx) / delta
+    # If both line segments are (nearly) parallel
+    if abs(delta) < 1e-6:
+        normal_distance = abs(dx0 * dy - dy0 * dx) / r0
+        if normal_distance > segment_0.width * overhang_threshold:
+            return False
+
+        t0 = (dx0 * dx + dy0 * dy) / (r0 ** 2)
+
+        dx = segment_1.x1 - segment_0.x0
+        dy = segment_1.y1 - segment_0.y0
+        t1 = (dx0 * dx + dy0 * dy) / (r0 ** 2)
+        # TODO
+        if 0 <= t0 < 1 and 0 <= t1 < 1:
+            pass
     
-    if 0 <= t <= 1 and 0 <= s <= 1:
-        return segment_0.x0 + t * dx0, segment_0.y0 + t * dy0
+    csc_angle = (r0 * r1) / abs(delta)
+    half_width = 0.5 * segment_1.width * csc_angle
+    
+    t0 = (dx1 * dy - dy1 * dx) / delta
+    t1 = (dx0 * dy - dy0 * dx) / delta
+    
+    if 0 <= t0 < 1 and 0 <= t1 < 1:
+        return (max(0, t0 - half_width / r0), min(1, t0 + half_width / r0))
     return False
 
 def process_g_code(input_file: str):
@@ -78,7 +96,7 @@ def process_g_code(input_file: str):
     objects[current_object] = MyObject(current_x, current_y)
     
     temp_file = re.sub(r"\.+", "_", input_file) + ".temp"
-    with open(input_file, 'r') as input_lines,
+    with open(input_file, 'r') as input_lines,\
             open(temp_file, 'w') as temp_lines:
         for line in input_lines:
             additional_lines = []
@@ -92,7 +110,7 @@ def process_g_code(input_file: str):
                 if current_object in list(objects):
                     objects[current_object].new_layer(layer_height, current_z)
                 else:
-                    objects[current_object] = Object()
+                    objects[current_object] = MyObject()
             
             # Get X coordinate from G1 move
             match = re.search(r"G1 [^X\n]*X([-\d\.]+)", line)
@@ -129,14 +147,14 @@ def process_g_code(input_file: str):
                 else:
                     line_type = OTHER
             
-            if line.startswith("G1") and ('X' in line or 'Y' in line)
+            if line.startswith("G1") and ('X' in line or 'Y' in line)\
                     and 'E' in line and "E-" not in line:
                 line_segment = LineSegment(previous_x, previous_y, current_x,
                         current_y, layer_height, width)
                 objects[current_object].add_line_segment(line_segment)
                 
                 if line_type is INTERNAL_INFILL:
-                    for previous_layer_line in
+                    for previous_layer_line in\
                             objects[current_object].previous_layer:
                         intersection = intersect(line_segment,
                                 previous_layer_line)
@@ -148,7 +166,7 @@ def process_g_code(input_file: str):
 
             temp_lines.writelines(additional_lines)
 
-    with open(temp_file, 'r') as temp_lines,
+    with open(temp_file, 'r') as temp_lines,\
             open(input_file, 'w') as input_lines:
         for line in temp_lines:
             input_lines.write(line)
