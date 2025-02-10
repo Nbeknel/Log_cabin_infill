@@ -26,6 +26,7 @@ class MyObject:
         self.previous_layer_height = 0
         self.current_layer_height = layer_height
         self.layer_z = layer_z
+        self.max_width = 0
         
     def new_layer(self, layer_z):
         self.previous_layer = self.current_layer
@@ -36,6 +37,9 @@ class MyObject:
 
     def add_line_segment(self, line_segment: LineSegment):
         self.current_layer.append(line_segment)
+
+    def set_width(self, width: float):
+        self.width = max(self.width, width)
 
 
 def intersect(segment_0: LineSegment, segment_1: LineSegment,
@@ -91,7 +95,7 @@ def intersect(segment_0: LineSegment, segment_1: LineSegment,
     return False
 
 
-def get_flow_multiplier(line: LineSegment, current_layer_height: float,
+def get_extrusion_multiplier(line: LineSegment, current_layer_height: float,
         previous_layer_height: float) -> float:
     alpha = 1 - 0.25 * math.pi
     current_section = (line.width - alpha * current_layer_height)\
@@ -103,7 +107,7 @@ def get_flow_multiplier(line: LineSegment, current_layer_height: float,
             / current_section
 
 
-def process_g_code(input_file: str):
+def process_g_code(input_file: str, minimum_length: float = 0):
     internal_infill = ["Internal infill"]
     OTHER = 0
     INTERNAL_INFILL = 1
@@ -176,6 +180,7 @@ def process_g_code(input_file: str):
             if match:
                 width = float(match.group(1))
                 temp_lines.write(line)
+                objects[current_object].set_width(width)
                 continue
 
             # Get current line height
@@ -203,23 +208,56 @@ def process_g_code(input_file: str):
                 
                 if line_type is INTERNAL_INFILL\
                         and line_segment.length > line_segment.width:
-                    increase_points = []
+                    if minimum_length == 0:
+                        minimum_length = 0.5 * objects[current_object].width
+                    increase_intervals = [[0, 1]]
                     for previous_layer_line in\
                             objects[current_object].previous_layer:
                         intersection = intersect(line_segment,
                                 previous_layer_line)
                         if intersection:
-                            increase_points.extend([[intersection[0], DECREASE],
-                                    [intersection[1], INCREASE]])
-                    increase_points = sorted(increase_points,
-                            key=lambda x: x[0])
+                            new_intervals = []
+                            start = intersection[0]
+                            stop = intersection[0]
+                            # TODO: create separate function, take segment length into account
+                            for interval in increase_intervals:
+                                if stop <= interval[0]:
+                                    new_intervals.append(interval)
+                                    continue
+                                if start >= interval[1]:
+                                    new_intervals.append(interval)
+                                    continue
+                                if start <= interval[0] and stop < interval[1]:
+                                    if interval[1] - stop > minimum_length:
+                                        new_intervals.append([stop, interval[1]])
+                                    continue
+                                if start > interval[0] and stop >= interval[1]:
+                                    if start - interval[0] > minimum_length:
+                                        new_intervals.append([interval[0], start])
+                                    continue
+                                if start > interval[0] and stop < interval[1]:
+                                    if interval[1] - stop > minimum_length:
+                                        new_intervals.append([stop, interval[1]])
+                                    if start - interval[0] > minimum_length:
+                                        new_intervals.append([interval[0], start])
+                                    continue
+                            increase_intervals = new_intervals
                     
-                    flow_multiplier = get_flow_multiplier(line_segment,
+                    extrusion_multiplier = get_extrusion_multiplier(line_segment,
                             objects[current_object].current_layer_height,
                             objects[current_object].previous_layer_height)
                     e_value = float(re.search(r"E([\.\d]+)", line).group(1))
-                    speed_increased_flow = speed / flow_multiplier
+                    speed_increased_extrusion = speed / extrusion_multiplier
 
+                    # TODO!!!
+                    for i, interval in enumerate(increase_intervals):
+                        if i == 0:
+                            if interval[0] == 0:
+                                pass
+                            else:
+                                pass
+                        else:
+                            pass
                     t_current = 0
                     t_previous = 0
                     increase_flow = 1
@@ -231,14 +269,14 @@ def process_g_code(input_file: str):
                                 increase_flow += increase_point[1]
                                 continue
                             additional_lines.append(
-                                    f"G1 F{speed_increased_flow:.3f}\n"
+                                    f"G1 F{speed_increased_extrusion:.3f}\n"
                             )
                             x = (1 - t_current) * line_segment.x0\
                                     + t_current * line_segment.x1
                             y = (1 - t_current) * line_segment.y0\
                                     + t_current * line_segment.y1
                             e = (t_current - t_previous) * e_value\
-                                    * flow_multiplier
+                                    * extrusion_multiplier
                             additional_lines.append(
                                     f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
                             )
