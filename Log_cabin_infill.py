@@ -5,6 +5,8 @@ import random
 import math
 
 
+# An extrusion line is stored as this class. Stores start and end
+# coordinates, extrusion width and length.
 class LineSegment:
     def __init__(self, x0: float, y0: float, x1: float, y1: float,
             width: float):
@@ -13,12 +15,13 @@ class LineSegment:
         self.x1 = x1
         self.y1 = y1
         self.width = width
-    
-    @property
-    def length(self):
-        return math.sqrt((self.x1 - self.x0) ** 2 + (self.y1 - self.y0) ** 2)
+        self.length = math.sqrt((self.x1 - self.x0) ** 2
+                + (self.y1 - self.y0) ** 2)
 
 
+# For each object on the buildplate store all extrusion lines of the
+# previous and current layer, layer heights and current maximum width
+# encountered.
 class MyObject:
     def __init__(self, layer_height=0, layer_z=0):
         self.previous_layer = []
@@ -39,9 +42,13 @@ class MyObject:
         self.current_layer.append(line_segment)
 
     def set_width(self, width: float):
-        self.width = max(self.width, width)
+        self.max_width = max(self.max_width, width)
 
 
+# For a line in the current layer, find at which it is supported by line
+# of the previous layer if the latter supports it at all. Return the
+# interval that is supported relative to the total length based on the
+# widths and intersection angle.
 def intersect(segment_0: LineSegment, segment_1: LineSegment,
 		overhang_threshold=0.5):
     epsilon = 1e-6
@@ -62,7 +69,7 @@ def intersect(segment_0: LineSegment, segment_1: LineSegment,
     dy = segment_1.y0 - segment_0.y0
     
     # If both line segments are (nearly) parallel
-    if abs(delta) < (r0 * r1) * math.sin(math.pi / 180):
+    if abs(delta) < (r0 * r1) * math.sin(math.pi / 720):
         x = 0.5 * (segment_0.x0 + segment_0.x1)
         y = 0.5 * (segment_0.y0 + segment_0.y1)
         n0 = abs(dy1 * (x - segment_1.x0) - dx1 * (y - segment_1.y0)) / r1
@@ -70,6 +77,8 @@ def intersect(segment_0: LineSegment, segment_1: LineSegment,
         y = 0.5 * (segment_1.y0 + segment_1.y1)
         n1 = abs(dy0 * (x - segment_0.x0) - dx0 * (y - segment_0.y0)) / r0
         normal_distance = min(n0, n1)
+        
+        # If not supported or barely supported.
         if normal_distance > segment_0.width * overhang_threshold:
             return False
 
@@ -84,17 +93,29 @@ def intersect(segment_0: LineSegment, segment_1: LineSegment,
             return (t_lower, t_upper)
         return False
     
+    # Calculate the length of subsegment that is supported based on the
+    # angle between the supporting and supported line.
     csc_angle = (r0 * r1) / abs(delta)
     half_width = 0.5 * segment_1.width * csc_angle
     
     t0 = (dx1 * dy - dy1 * dx) / delta
     t1 = (dx0 * dy - dy0 * dx) / delta
     
-    if 0 <= t0 <= 1 and 0 <= t1 <= 1:
-        return (max(0, t0 - half_width / r0), min(1, t0 + half_width / r0))
+    # Without the margin this algorithm finds the intersection of the
+    # centerlines of an extrusion. By udding a margin value we can find
+    # out whether the start or end point is supported by the previous
+    # layer.
+    margin = segment_1.width * overhang_threshold / r0
+    
+    if -margin <= t0 <= 1 + margin and -margin <= t1 <= 1 + margin:
+        return (max(- margin, t0 - half_width / r0), min(1 + margin, t0 + half_width / r0))
     return False
 
 
+# Calculate the extrusion multiplier for segments that are not
+# supported, by finding the areas of the cross sections of the current
+# layer and previous layer for a given line width, and then dividing
+# their sum by the cross sectional area of the current layer.
 def get_extrusion_multiplier(line: LineSegment, current_layer_height: float,
         previous_layer_height: float) -> float:
     alpha = 1 - 0.25 * math.pi
@@ -102,9 +123,47 @@ def get_extrusion_multiplier(line: LineSegment, current_layer_height: float,
             * current_layer_height
     previous_section = (line.width - alpha * previous_layer_height)\
             * previous_layer_height
-    rect_section = line.width * (current_layer_height + previous_layer_height)
-    return 0.5 * (current_section + previous_section + rect_section)\
-            / current_section
+    #rect_section = line.width * (current_layer_height + previous_layer_height)
+    #return 0.5 * (current_section + previous_section + rect_section)\
+    #        / current_section
+    return (current_section + previous_section) / current_section
+
+
+# Find the result of the subtraction of an interval from a union of
+# intervals.
+# `increase_intervals` := A = U{[a_i, b_i]| 0 <= i <= n, b_{i-1} < a_i < b_i < a_{i+1}}
+# `exclude_interval` := B = [a, b]
+# C = A \ B
+# D = U{c in C| |c| >= minimum_length}
+# return D
+def exclude_interval(increase_intervals: list, exclude_interval: tuple,
+        segment_length: float, minimum_length: float) -> list:
+    new_intervals = []
+    start = exclude_interval[0]
+    stop = exclude_interval[1]
+    threshold = minimum_length / segment_length
+    for interval in increase_intervals:
+        if stop <= interval[0]:
+            new_intervals.append(interval)
+            continue
+        if start >= interval[1]:
+            new_intervals.append(interval)
+            continue
+        if start <= interval[0] and stop <= interval[1]:
+            if interval[1] - stop > threshold:
+                new_intervals.append([stop, interval[1]])
+            continue
+        if start >= interval[0] and stop >= interval[1]:
+            if start - interval[0] > threshold:
+                new_intervals.append([interval[0], start])
+            continue
+        if start >= interval[0] and stop <= interval[1]:
+            if interval[1] - stop > threshold:
+                new_intervals.append([stop, interval[1]])
+            if start - interval[0] > threshold:
+                new_intervals.append([interval[0], start])
+            continue
+    return sorted(new_intervals, key=lambda x: x[0])
 
 
 def process_g_code(input_file: str, minimum_length: float = 0):
@@ -129,6 +188,8 @@ def process_g_code(input_file: str, minimum_length: float = 0):
     
     objects[current_object] = MyObject()
     
+    # Open two files. Read a line from one, modify it if required, and
+    # write to the second file.
     temp_file = re.sub(r"\.+", "_", input_file) + ".temp"
     with open(input_file, 'r') as input_lines,\
             open(temp_file, 'w') as temp_lines:
@@ -136,7 +197,7 @@ def process_g_code(input_file: str, minimum_length: float = 0):
             additional_lines = []
             
             # Extract data per object in case different objects have
-            # different layer heights, or if an object is sliceed with
+            # different layer heights, or if an object is sliced with
             # variable layer height
             match = re.search(r"; printing object ([^\n]*)", line)
             if match:
@@ -161,7 +222,7 @@ def process_g_code(input_file: str, minimum_length: float = 0):
                 current_y = float(match.group(1))
             
             # Get toolhead speed from G1 command
-            match = re.search(r"G1 [^XYEF\n]*F([-\d\.]+)", line)
+            match = re.search(r"G1 [^ZXYEF\n]*F([-\d\.]+)", line)
             if match:
                 speed = float(match.group(1))
                 if line_type is not INTERNAL_INFILL:
@@ -181,6 +242,7 @@ def process_g_code(input_file: str, minimum_length: float = 0):
                 width = float(match.group(1))
                 temp_lines.write(line)
                 objects[current_object].set_width(width)
+                minimum_length = 0.5 * objects[current_object].max_width
                 continue
 
             # Get current line height
@@ -200,128 +262,137 @@ def process_g_code(input_file: str, minimum_length: float = 0):
                 temp_lines.write(line)
                 continue
             
+            # Find extrusion lines inside internal infill and modify
+            # them, increase extrusion and slow down toolhead speed for
+            # unsupported segments.
             if line.startswith("G1") and ('X' in line or 'Y' in line)\
                     and 'E' in line and "E-" not in line:
                 line_segment = LineSegment(previous_x, previous_y, current_x,
                         current_y, width)
                 objects[current_object].add_line_segment(line_segment)
                 
-                if line_type is INTERNAL_INFILL\
-                        and line_segment.length > line_segment.width:
-                    if minimum_length == 0:
-                        minimum_length = 0.5 * objects[current_object].width
+                if line_type is INTERNAL_INFILL and\
+                        line_segment.length > minimum_length:
                     increase_intervals = [[0, 1]]
                     for previous_layer_line in\
                             objects[current_object].previous_layer:
                         intersection = intersect(line_segment,
                                 previous_layer_line)
                         if intersection:
-                            new_intervals = []
-                            start = intersection[0]
-                            stop = intersection[0]
-                            # TODO: create separate function, take segment length into account
-                            for interval in increase_intervals:
-                                if stop <= interval[0]:
-                                    new_intervals.append(interval)
-                                    continue
-                                if start >= interval[1]:
-                                    new_intervals.append(interval)
-                                    continue
-                                if start <= interval[0] and stop < interval[1]:
-                                    if interval[1] - stop > minimum_length:
-                                        new_intervals.append([stop, interval[1]])
-                                    continue
-                                if start > interval[0] and stop >= interval[1]:
-                                    if start - interval[0] > minimum_length:
-                                        new_intervals.append([interval[0], start])
-                                    continue
-                                if start > interval[0] and stop < interval[1]:
-                                    if interval[1] - stop > minimum_length:
-                                        new_intervals.append([stop, interval[1]])
-                                    if start - interval[0] > minimum_length:
-                                        new_intervals.append([interval[0], start])
-                                    continue
-                            increase_intervals = new_intervals
+                            increase_intervals = exclude_interval(
+                                    increase_intervals, intersection,
+                                    line_segment.length, minimum_length
+                            )
                     
-                    extrusion_multiplier = get_extrusion_multiplier(line_segment,
+                    extrusion_multiplier = get_extrusion_multiplier(
+                            line_segment,
                             objects[current_object].current_layer_height,
-                            objects[current_object].previous_layer_height)
+                            objects[current_object].previous_layer_height
+                    )
                     e_value = float(re.search(r"E([\.\d]+)", line).group(1))
                     speed_increased_extrusion = speed / extrusion_multiplier
-
-                    # TODO!!!
-                    for i, interval in enumerate(increase_intervals):
-                        if i == 0:
-                            if interval[0] == 0:
-                                pass
+                    increased_height = objects[current_object].current_layer_height\
+                            + objects[current_object].previous_layer_height
+                    
+                    if len(increase_intervals) > 0:
+                        for i, interval in enumerate(increase_intervals):
+                            if i == 0:
+                                if interval[0] == 0:
+                                    x = (1 - interval[1]) * line_segment.x0\
+                                            + interval[1] * line_segment.x1
+                                    y = (1 - interval[1]) * line_segment.y0\
+                                            + interval[1] * line_segment.y1
+                                    e = interval[1] * e_value\
+                                            * extrusion_multiplier
+                                    additional_lines.append(
+                                            f";HEIGHT:{increased_height:.3f}\n"
+                                    )
+                                    additional_lines.append(
+                                            f"G1 F{speed_increased_extrusion:.3f}\n"
+                                    )
+                                    additional_lines.append(
+                                            f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
+                                    )
+                                else:
+                                    x = (1 - interval[0]) * line_segment.x0\
+                                            + interval[0] * line_segment.x1
+                                    y = (1 - interval[0]) * line_segment.y0\
+                                            + interval[0] * line_segment.y1
+                                    e = interval[0] * e_value
+                                    additional_lines.append(
+                                            f";HEIGHT:{objects[current_object].current_layer_height:.3f}\n"
+                                    )
+                                    additional_lines.append(
+                                            f"G1 F{speed:.3f}\n"
+                                    )
+                                    additional_lines.append(
+                                            f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
+                                    )
+                                    x = (1 - interval[1]) * line_segment.x0\
+                                            + interval[1] * line_segment.x1
+                                    y = (1 - interval[1]) * line_segment.y0\
+                                            + interval[1] * line_segment.y1
+                                    e = (interval[1] - interval[0] ) * e_value\
+                                            * extrusion_multiplier
+                                    additional_lines.append(
+                                            f";HEIGHT:{increased_height:.3f}\n"
+                                    )
+                                    additional_lines.append(
+                                            f"G1 F{speed_increased_extrusion:.3f}\n"
+                                    )
+                                    additional_lines.append(
+                                            f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
+                                    )
                             else:
-                                pass
-                        else:
-                            pass
-                    t_current = 0
-                    t_previous = 0
-                    increase_flow = 1
-                    for increase_point in increase_points:
-                        t_previous = t_current
-                        t_current = increase_point[0]
-                        if increase_flow > 0:
-                            if abs(t_current - t_previous) < 1e-6:
-                                increase_flow += increase_point[1]
-                                continue
+                                x = (1 - interval[0]) * line_segment.x0\
+                                        + interval[0] * line_segment.x1
+                                y = (1 - interval[0]) * line_segment.y0\
+                                        + interval[0] * line_segment.y1
+                                e = (interval[0] - increase_intervals[i - 1][1])\
+                                        * e_value
+                                additional_lines.append(
+                                        f";HEIGHT:{objects[current_object].current_layer_height:.3f}\n"
+                                )
+                                additional_lines.append(
+                                        f"G1 F{speed:.3f}\n"
+                                )
+                                additional_lines.append(
+                                        f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
+                                )
+                                x = (1 - interval[1]) * line_segment.x0\
+                                        + interval[1] * line_segment.x1
+                                y = (1 - interval[1]) * line_segment.y0\
+                                        + interval[1] * line_segment.y1
+                                e = (interval[1] - interval[0] ) * e_value\
+                                        * extrusion_multiplier
+                                additional_lines.append(
+                                        f";HEIGHT:{increased_height:.3f}\n"
+                                )
+                                additional_lines.append(
+                                        f"G1 F{speed_increased_extrusion:.3f}\n"
+                                )
+                                additional_lines.append(
+                                        f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
+                                )
+                        if increase_intervals[-1][1] < 1:
+                            x = line_segment.x1
+                            y = line_segment.y1
+                            e = (1 - increase_intervals[-1][1]) * e_value
                             additional_lines.append(
-                                    f"G1 F{speed_increased_extrusion:.3f}\n"
+                                    f";HEIGHT:{objects[current_object].current_layer_height:.3f}\n"
                             )
-                            x = (1 - t_current) * line_segment.x0\
-                                    + t_current * line_segment.x1
-                            y = (1 - t_current) * line_segment.y0\
-                                    + t_current * line_segment.y1
-                            e = (t_current - t_previous) * e_value\
-                                    * extrusion_multiplier
-                            additional_lines.append(
-                                    f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
-                            )
-                        else:
-                            if abs(t_current - t_previous) < 1e-6:
-                                increase_flow += increase_point[1]
-                                continue
                             additional_lines.append(
                                     f"G1 F{speed:.3f}\n"
                             )
-                            x = (1 - t_current) * line_segment.x0\
-                                + t_current * line_segment.x1
-                            y = (1 - t_current) * line_segment.y0\
-                                + t_current * line_segment.y1
-                            e = (t_current - t_previous) * e_value
                             additional_lines.append(
                                     f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
                             )
-                        increase_flow += increase_point[1]
-                    if t_current < 1 or len(additional_lines) == 0:
-                        if increase_flow > 0:
-                            if abs(t_current - t_previous) < 1e-6:
-                                continue
-                            additional_lines.append(
-                                    f"G1 F{speed_increased_flow:.3f}\n"
-                            )
-                            x = line_segment.x1
-                            y = line_segment.y1
-                            e = (1 - t_current) * e_value * flow_multiplier
-                            additional_lines.append(
-                                    f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
-                            )
-                        else:
-                            if abs(t_current - t_previous) < 1e-6:
-                                continue
-                            additional_lines.append(
-                                    f"G1 F{speed:.3f}\n"
-                            )
-                            x = line_segment.x1
-                            y = line_segment.y1
-                            e = (1 - t_current) * e_value
-                            additional_lines.append(
-                                    f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
-                            )
-                    #additional_lines.append(f"G1 F{speed:.3f}\n")
+                        additional_lines.append(
+                                f";HEIGHT:{objects[current_object].current_layer_height:.3f}\n"
+                        )
+                    else:
+                        additional_lines.append(f"G1 F{speed:.3f}\n")
+                        additional_lines.append(line)
                 else:
                     additional_lines.append(line)
             else:
@@ -329,6 +400,8 @@ def process_g_code(input_file: str, minimum_length: float = 0):
 
             temp_lines.writelines(additional_lines)
 
+    # Copy G-code from the temporary file to the main file, and delete
+    # the temporaryfile from the folder.
     with open(temp_file, 'r') as temp_lines,\
             open(input_file, 'w') as input_lines:
         for line in temp_lines:
@@ -337,10 +410,24 @@ def process_g_code(input_file: str, minimum_length: float = 0):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="G-code post-processing "
-            "script to increase flow of sparse infill lines along intervals "
-            "that are not supported by infill from the previous layer.")
-    parser.add_argument("input_file", help="Path to the input G-code file")
+    parser = argparse.ArgumentParser(description=
+"""G-code post-processing script to increase flow of sparse infill lines
+along intervals that are not supported by infill from the previous
+layer.""")
+    parser.add_argument("input_file",
+            help="Path to the input G-code file.")
+    parser.add_argument("--minimum_length", type=str, default="50%",
+            help=
+"""The script will not try to extrude into gaps smaller than this
+distance. If expressed as a percentage it is calculated over the nozzle
+diameter.
+Default value: 50%""")
+    parser.add_argument("--overhang_threshold", type=str, default="50%",
+            help=
+"""The script will not try to increase extrusion when a line or
+subsegment is supported by at least this distance. If expressed as a
+percentage it is calculated over the nozzle diameter.
+Default value: 50%""")
     args = parser.parse_args()
     
     process_g_code(args.input_file)
