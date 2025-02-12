@@ -50,7 +50,7 @@ class MyObject:
 # interval that is supported relative to the total length based on the
 # widths and intersection angle.
 def intersect(segment_0: LineSegment, segment_1: LineSegment,
-		overhang_threshold=0.5):
+		overhang_threshold):
     epsilon = 1e-6
     # segment_0: in current layer
     # segment_1: in previous layer
@@ -69,7 +69,7 @@ def intersect(segment_0: LineSegment, segment_1: LineSegment,
     dy = segment_1.y0 - segment_0.y0
     
     # If both line segments are (nearly) parallel
-    if abs(delta) < (r0 * r1) * math.sin(math.pi / 720):
+    if abs(delta) < (r0 * r1) * math.sin(math.pi / 180):
         x = 0.5 * (segment_0.x0 + segment_0.x1)
         y = 0.5 * (segment_0.y0 + segment_0.y1)
         n0 = abs(dy1 * (x - segment_1.x0) - dx1 * (y - segment_1.y0)) / r1
@@ -79,7 +79,7 @@ def intersect(segment_0: LineSegment, segment_1: LineSegment,
         normal_distance = min(n0, n1)
         
         # If not supported or barely supported.
-        if normal_distance > segment_0.width * overhang_threshold:
+        if normal_distance > overhang_threshold:
             return False
 
         t0 = (dx0 * dx + dy0 * dy) / (r0 ** 2)
@@ -105,7 +105,7 @@ def intersect(segment_0: LineSegment, segment_1: LineSegment,
     # centerlines of an extrusion. By udding a margin value we can find
     # out whether the start or end point is supported by the previous
     # layer.
-    margin = segment_1.width * overhang_threshold / r0
+    margin = overhang_threshold / r0
     
     if -margin <= t0 <= 1 + margin and -margin <= t1 <= 1 + margin:
         return (max(- margin, t0 - half_width / r0), min(1 + margin, t0 + half_width / r0))
@@ -166,7 +166,8 @@ def exclude_interval(increase_intervals: list, exclude_interval: tuple,
     return sorted(new_intervals, key=lambda x: x[0])
 
 
-def process_g_code(input_file: str, minimum_length: float = 0):
+def process_g_code(input_file: str, minimum_length: float,
+        overhang_threshold: float):
     internal_infill = ["Internal infill"]
     OTHER = 0
     INTERNAL_INFILL = 1
@@ -277,7 +278,7 @@ def process_g_code(input_file: str, minimum_length: float = 0):
                     for previous_layer_line in\
                             objects[current_object].previous_layer:
                         intersection = intersect(line_segment,
-                                previous_layer_line)
+                                previous_layer_line, overhang_threshold)
                         if intersection:
                             increase_intervals = exclude_interval(
                                     increase_intervals, intersection,
@@ -394,6 +395,7 @@ def process_g_code(input_file: str, minimum_length: float = 0):
                         additional_lines.append(f"G1 F{speed:.3f}\n")
                         additional_lines.append(line)
                 else:
+                    additional_lines.append(f"G1 F{speed:.3f}\n")
                     additional_lines.append(line)
             else:
                 additional_lines.append(line)
@@ -409,6 +411,44 @@ def process_g_code(input_file: str, minimum_length: float = 0):
     os.remove(temp_file)
 
 
+def preprocess(input_file: str, minimum_length: str, overhang_threshold: str):
+    nozzle_diameter = 0.4
+    if "SLIC3R_NOZZLE_DIAMETER" in list(os.environ):
+        # Multiple extruder support will be added later
+        nozzle_diameter =\
+                float(os.environ["SLIC3R_NOZZLE_DIAMETER"].split(',')[0])
+    else:
+        with open(input_file, 'r') as input_lines:
+            for line in input_lines:
+                match = re.search(r"; nozzle_diameter = ([\.\d]+)", line)
+                if match:
+                    nozzle_diameter = float(match.group(1))
+                    break
+
+    # Ensures the given string is of an allowed form with percentages
+    # e.g. 50%, 12.5%, 0.45%
+    match_percent = re.search(r"^(\d*(\.\d+)?)%$", minimum_length)
+    match_float = re.search(r"^(\d*(\.\d+)?)$", minimum_length)
+    if match_percent:
+        minimum_length = nozzle_diameter * 0.01 * float(match_percent.group(1))
+    elif match_float:
+        minimum_length = float(match_float.group(1))
+    else:
+        minimum_length = 0.5 * nozzle_diameter
+        
+    match_percent = re.search(r"^(\d*(\.\d+)?)%$", overhang_threshold)
+    match_float = re.search(r"^(\d*(\.\d+)?)$", overhang_threshold)
+    if match_percent:
+        overhang_threshold = nozzle_diameter * 0.01\
+                * float(match_percent.group(1))
+    elif match_float:
+        overhang_threshold = float(match_float.group(1))
+    else:
+        overhang_threshold = 0.5 * nozzle_diameter
+    
+    return minimum_length, overhang_threshold
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=
 """G-code post-processing script to increase flow of sparse infill lines
@@ -421,14 +461,16 @@ layer.""")
 """The script will not try to extrude into gaps smaller than this
 distance. If expressed as a percentage it is calculated over the nozzle
 diameter.
-Default value: 50%""")
+Default value: 50%.""")
     parser.add_argument("--overhang_threshold", type=str, default="50%",
             help=
 """The script will not try to increase extrusion when a line or
 subsegment is supported by at least this distance. If expressed as a
 percentage it is calculated over the nozzle diameter.
-Default value: 50%""")
+Default value: 50%.""")
     args = parser.parse_args()
     
-    process_g_code(args.input_file)
+    minimum_length, overhang_threshold = preprocess(args.input_file,
+            args.minimum_length, args.overhang_threshold)
+    process_g_code(args.input_file, minimum_length, overhang_threshold)
     pass
