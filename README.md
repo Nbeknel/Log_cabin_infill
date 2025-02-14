@@ -29,6 +29,19 @@ is supported by at least this distance. If expressed as a percentage it
 is calculated over the nozzle diameter.\
 Default value: 50%.
 
+`--slowdown_speed`\
+When set to zero, the script will slow down infill speed to maintain
+a constant volumetric flow. This will result in jittering movements when
+printing infill. With this setting you can reduce the print speed of the
+fast segments of infill, since those will be on the smaller side, and
+the target speed most likely won't be reached. A value between 0 and 1
+will linearly interpolate between the default infill speed and the
+reduced infill speed, with 0 - default speed and 1 - reduced infill
+speed. Can be expressed as a percentage (50% = 0.5). If set to -1, the
+script will create a dynamic slowdown loosely based on Klipper's
+ACCEL_TO_DECEL algorithm.\
+Default value: 0.
+
 #
 Currently supports only single extruder printers, or it will use the
 nozzle diameter of the first extruder.\
