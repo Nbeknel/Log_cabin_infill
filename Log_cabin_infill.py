@@ -1,3 +1,5 @@
+#!/usr/bin/python
+
 import re
 import argparse
 import os
@@ -22,27 +24,29 @@ class LineSegment:
 # For each object on the buildplate store all extrusion lines of the
 # previous and current layer, layer heights and current maximum width
 # encountered.
-class MyObject:
+class GcodeObject:
     def __init__(self, layer_height=0, layer_z=0):
         self.previous_layer = []
         self.current_layer = []
         self.previous_layer_height = 0
         self.current_layer_height = layer_height
         self.layer_z = layer_z
-        self.max_width = 0
+        self.previous_z = layer_z - layer_height
+        self.has_only_support = True
         
     def new_layer(self, layer_z):
-        self.previous_layer = self.current_layer
-        self.current_layer = []
-        self.previous_layer_height = self.current_layer_height
-        self.current_layer_height = layer_z - self.layer_z
+        if not self.has_only_support:
+            self.previous_layer_height = self.current_layer_height
+            self.previous_z = self.layer_z
+            self.previous_layer = self.current_layer
+            
+        self.current_layer_height = layer_z - self.previous_z
         self.layer_z = layer_z
+        self.has_only_support = True
+        self.current_layer = []        
 
     def add_line_segment(self, line_segment: LineSegment):
         self.current_layer.append(line_segment)
-
-    def set_width(self, width: float):
-        self.max_width = max(self.max_width, width)
 
 
 # For a line in the current layer, find at which it is supported by line
@@ -168,7 +172,8 @@ def exclude_interval(increase_intervals: list, exclude_interval: tuple,
 
 def process_g_code(input_file: str, minimum_length: float,
         overhang_threshold: float):
-    internal_infill = ["Internal infill"]
+    internal_infill = ["Internal infill", "Sparse infill"]
+    support_material = ["Support material", "Support material interface"]
     OTHER = 0
     INTERNAL_INFILL = 1
     
@@ -187,7 +192,7 @@ def process_g_code(input_file: str, minimum_length: float,
     line_type = OTHER
     speed = 0
     
-    objects[current_object] = MyObject()
+    objects[current_object] = GcodeObject()
     
     # Open two files. Read a line from one, modify it if required, and
     # write to the second file.
@@ -200,14 +205,28 @@ def process_g_code(input_file: str, minimum_length: float,
             # Extract data per object in case different objects have
             # different layer heights, or if an object is sliced with
             # variable layer height
-            match = re.search(r"; printing object ([^\n]*)", line)
+            match_object_start = []
+            # Match OctoPrint labels
+            match_object_start.append(re.search(r"; printing object ([^\n]*)", line))
+            # Match Klipper labels
+            match_object_start.append(re.search(r"EXCLUDE_OBJECT_START NAME=([^\n]*)", line))
+            # Match Marlin 2 labels
+            match_object_start.append(re.search(r"M486 S(\d+)", line))
+            if any(match_object_start):
+                for match in match_object_start:
+                    if match:
+                        current_object = match.group(1)
+                        if current_object not in list(objects):
+                            objects[current_object] = GcodeObject(layer_height, current_z)
+                        temp_lines.write(line)
+                        continue
+            
+            # Get current layer height
+            match = re.search(r";Z:([\.\d]+)", line)
             if match:
-                current_object = match.group(1)
-                if current_object in list(objects):
-                    objects[current_object].new_layer(layer_z=current_z)
-                else:
-                    objects[current_object] = MyObject(layer_height, current_z)
+                current_z = float(match.group(1))
                 temp_lines.write(line)
+                objects[current_object].new_layer(current_z)
                 continue
             
             # Get X coordinate from G1 move
@@ -230,20 +249,11 @@ def process_g_code(input_file: str, minimum_length: float,
                     temp_lines.write(line)
                 continue
             
-            # Get current layer height
-            match = re.search(r";Z:([\.\d]+)", line)
-            if match:
-                current_z = float(match.group(1))
-                temp_lines.write(line)
-                continue
-            
             # Get current line width
             match = re.search(r";WIDTH:([\.\d]+)", line)
             if match:
                 width = float(match.group(1))
                 temp_lines.write(line)
-                objects[current_object].set_width(width)
-                minimum_length = 0.5 * objects[current_object].max_width
                 continue
 
             # Get current line height
@@ -260,6 +270,9 @@ def process_g_code(input_file: str, minimum_length: float,
                     line_type = INTERNAL_INFILL
                 else:
                     line_type = OTHER
+                    
+                if match.group(1) not in support_material:
+                    objects[current_object].has_only_support = False
                 temp_lines.write(line)
                 continue
             
