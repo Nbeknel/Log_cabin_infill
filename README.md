@@ -32,4 +32,6 @@ Default value: 50%.
 #
 Currently supports only single extruder printers, or it will use the
 nozzle diameter of the first extruder.\
-Only tested in SuperSlicer 2.5.59.13, will test other slicers later.
+Tested in SuperSlicer 2.5.59.13 and PrusaSlicer 2.9.0. For some reason
+it won't work with OrcaSlicer, but since OrcaSlicer doesn't provide a
+slicer with a console, I can't read out the error.
