@@ -6,6 +6,10 @@ import os
 import random
 import math
 
+# Slowdown method
+SCALAR = False
+AUTOMATIC = True
+
 
 # An extrusion line is stored as this class. Stores start and end
 # coordinates, extrusion width and length.
@@ -112,7 +116,8 @@ def intersect(segment_0: LineSegment, segment_1: LineSegment,
     margin = overhang_threshold / r0
     
     if -margin <= t0 <= 1 + margin and -margin <= t1 <= 1 + margin:
-        return (max(- margin, t0 - half_width / r0), min(1 + margin, t0 + half_width / r0))
+        return (max(- margin, t0 - half_width / r0),\
+                min(1 + margin, t0 + half_width / r0))
     return False
 
 
@@ -168,10 +173,45 @@ def exclude_interval(increase_intervals: list, exclude_interval: tuple,
                 new_intervals.append([interval[0], start])
             continue
     return sorted(new_intervals, key=lambda x: x[0])
+    
+
+# The automatic method returns the average speed over a given distance
+# with a certain initial speed, target speed and final speed, which is
+# assumed to be the speed when extrusion is increased.
+def get_speed(target_speed: float, previous_speed: float, slow_speed: float,
+        acceleration: float, distance: float, slowdown_coefficient: float,
+        slowdown_method: bool) -> float:
+    target_speed /= 60
+    previous_speed /= 60
+    slow_speed /= 60
+    
+    if slowdown_method is SCALAR:
+        return 60 * (slowdown_coefficient * slow_speed\
+                + (1 - slowdown_coefficient) * target_speed)
+    
+    # Slowdown method is automatic
+    if 3 * (previous_speed ** 2) + slow_speed ** 2\
+            > 4 * previous_speed * slow_speed + acceleration * distance:
+        return 60 * slow_speed
+    t_dec = (previous_speed - slow_speed) / acceleration
+    d_dec = previous_speed * t_dec - 0.5 * acceleration * (t_dec ** 2)
+    d = distance - d_dec
+    t_acc = (target_speed - previous_speed) / acceleration
+    d_acc = 2 * previous_speed * t_acc + acceleration * (t_acc ** 2)
+    if d < d_acc:
+        t_acc = (math.sqrt(previous_speed ** 2 + acceleration * d)\
+                - previous_speed) / acceleration
+        t_total = t_dec + 2 * t_acc
+        return 60 * distance / t_total
+    d_coast = d - d_acc
+    t_coast = d_coast / target_speed
+    t_total = t_dec + 2 * t_acc + t_coast
+    return 60 * distance / t_total
 
 
 def process_g_code(input_file: str, minimum_length: float,
-        overhang_threshold: float):
+        overhang_threshold: float, slowdown_coefficient: float,
+        slowdown_method: bool):
     internal_infill = ["Internal infill", "Sparse infill"]
     support_material = ["Support material", "Support material interface"]
     OTHER = 0
@@ -191,6 +231,8 @@ def process_g_code(input_file: str, minimum_length: float,
     layer_height = 0
     line_type = OTHER
     speed = 0
+    previous_speed = 0
+    acceleration = 0
     
     objects[current_object] = GcodeObject()
     
@@ -242,11 +284,18 @@ def process_g_code(input_file: str, minimum_length: float,
                 current_y = float(match.group(1))
             
             # Get toolhead speed from G1 command
-            match = re.search(r"G1 [^ZXYEF\n]*F([-\d\.]+)", line)
+            match = re.search(r"G1 [^ZXYEF\n]*F([\d\.]+)", line)
             if match:
+                previous_speed = speed
                 speed = float(match.group(1))
                 if line_type is not INTERNAL_INFILL:
                     temp_lines.write(line)
+                continue
+            
+            # Get toolhead acceleration from M204 command
+            match = re.search(r"M204 [^S\n]*S([\d\.]+)", line)
+            if match:
+                acceleration = float(match.group(1))
                 continue
             
             # Get current line width
@@ -327,17 +376,27 @@ def process_g_code(input_file: str, minimum_length: float,
                                     additional_lines.append(
                                             f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
                                     )
+                                    previous_speed = speed_increased_extrusion
                                 else:
                                     x = (1 - interval[0]) * line_segment.x0\
                                             + interval[0] * line_segment.x1
                                     y = (1 - interval[0]) * line_segment.y0\
                                             + interval[0] * line_segment.y1
                                     e = interval[0] * e_value
+                                    distance = interval[0]\
+                                            * line_segment.length
+                                    slowdown_speed = get_speed(
+                                            speed, previous_speed,
+                                            speed_increased_extrusion,
+                                            acceleration, distance,
+                                            slowdown_coefficient,
+                                            slowdown_method
+                                    )
                                     additional_lines.append(
                                             f";HEIGHT:{objects[current_object].current_layer_height:.3f}\n"
                                     )
                                     additional_lines.append(
-                                            f"G1 F{speed:.3f}\n"
+                                            f"G1 F{slowdown_speed:.3f}\n"
                                     )
                                     additional_lines.append(
                                             f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
@@ -357,6 +416,7 @@ def process_g_code(input_file: str, minimum_length: float,
                                     additional_lines.append(
                                             f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
                                     )
+                                    previous_speed = speed_increased_extrusion
                             else:
                                 x = (1 - interval[0]) * line_segment.x0\
                                         + interval[0] * line_segment.x1
@@ -364,11 +424,19 @@ def process_g_code(input_file: str, minimum_length: float,
                                         + interval[0] * line_segment.y1
                                 e = (interval[0] - increase_intervals[i - 1][1])\
                                         * e_value
+                                distance = (interval[0] - increase_intervals[i - 1][1])\
+                                        * line_segment.length
+                                slowdown_speed = get_speed(
+                                        speed, previous_speed,
+                                        speed_increased_extrusion,
+                                        acceleration, distance,
+                                        slowdown_coefficient, slowdown_method
+                                )
                                 additional_lines.append(
                                         f";HEIGHT:{objects[current_object].current_layer_height:.3f}\n"
                                 )
                                 additional_lines.append(
-                                        f"G1 F{speed:.3f}\n"
+                                        f"G1 F{slowdown_speed:.3f}\n"
                                 )
                                 additional_lines.append(
                                         f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
@@ -388,19 +456,29 @@ def process_g_code(input_file: str, minimum_length: float,
                                 additional_lines.append(
                                         f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
                                 )
+                                previous_speed = speed_increased_extrusion
                         if increase_intervals[-1][1] < 1:
                             x = line_segment.x1
                             y = line_segment.y1
                             e = (1 - increase_intervals[-1][1]) * e_value
+                            distance = (1 - increase_intervals[-1][1])\
+                                    * line_segment.length
+                            slowdown_speed = get_speed(
+                                    speed, previous_speed,
+                                    speed_increased_extrusion, acceleration,
+                                    distance, slowdown_coefficient,
+                                    slowdown_method
+                            )
                             additional_lines.append(
                                     f";HEIGHT:{objects[current_object].current_layer_height:.3f}\n"
                             )
                             additional_lines.append(
-                                    f"G1 F{speed:.3f}\n"
+                                    f"G1 F{slowdown_speed:.3f}\n"
                             )
                             additional_lines.append(
                                     f"G1 X{x:.3f} Y{y:.3f} E{e:.5f}\n"
                             )
+                            previous_speed = slowdown_speed
                         additional_lines.append(
                                 f";HEIGHT:{objects[current_object].current_layer_height:.3f}\n"
                         )
@@ -424,7 +502,8 @@ def process_g_code(input_file: str, minimum_length: float,
     os.remove(temp_file)
 
 
-def preprocess(input_file: str, minimum_length: str, overhang_threshold: str):
+def preprocess(input_file: str, minimum_length: str, overhang_threshold: str,
+        slowdown_speed: str):
     nozzle_diameter = 0.4
     if "SLIC3R_NOZZLE_DIAMETER" in list(os.environ):
         # Multiple extruder support will be added later
@@ -459,7 +538,19 @@ def preprocess(input_file: str, minimum_length: str, overhang_threshold: str):
     else:
         overhang_threshold = 0.5 * nozzle_diameter
     
-    return minimum_length, overhang_threshold
+    slowdown_method = SCALAR
+    slowdown_coefficient = 0
+    match_percent = re.search(r"^(\d*(\.\d+)?)%$", slowdown_speed)
+    match_float = re.search(r"^(\d*(\.\d+)?)$", slowdown_speed)
+    if slowdown_speed == "-1":
+        slowdown_method = AUTOMATIC
+    elif match_percent:
+        slowdown_coefficient = 0.01 * float(match_percent.group(1))
+    elif match_float:
+        slowdown_coefficient = float(match_float.group(1))
+    
+    return minimum_length, overhang_threshold, slowdown_method,\
+            slowdown_coefficient
 
 
 if __name__ == "__main__":
@@ -481,9 +572,25 @@ Default value: 50%.""")
 subsegment is supported by at least this distance. If expressed as a
 percentage it is calculated over the nozzle diameter.
 Default value: 50%.""")
+    parser.add_argument("--slowdown_speed", type=str, default="0",
+            help=
+"""When set to zero, the script will slow down infill speed to maintain
+a constant volumetric flow. This will result in jittering movements when
+printing infill. With this setting you can reduce the print speed of the
+fast segments of infill, since those will be on the smaller side, and
+the target speed most likely won't be reached. A value between 0 and 1
+will linearly interpolate between the default infill speed and the
+reduced infill speed, with 0 - default speed and 1 - reduced infill
+speed. Can be expressed as a percentage (50% = 0.5). If set to -1, the
+script will create a dynamic slowdown loosely based on Klipper's
+ACCEL_TO_DECEL algorithm.
+Default value: 0.""")
     args = parser.parse_args()
     
-    minimum_length, overhang_threshold = preprocess(args.input_file,
-            args.minimum_length, args.overhang_threshold)
-    process_g_code(args.input_file, minimum_length, overhang_threshold)
+    minimum_length, overhang_threshold, slowdown_method, slowdown_coefficient\
+            = preprocess(args.input_file,
+            args.minimum_length, args.overhang_threshold,
+            args.slowdown_speed)
+    process_g_code(args.input_file, minimum_length, overhang_threshold,\
+            slowdown_coefficient, slowdown_method)
     pass
