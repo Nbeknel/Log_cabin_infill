@@ -39,15 +39,16 @@ class GcodeObject:
         self.has_only_support = True
         
     def new_layer(self, layer_z):
-        if not self.has_only_support:
-            self.previous_layer_height = self.current_layer_height
-            self.previous_z = self.layer_z
-            self.previous_layer = self.current_layer
-            
-        self.current_layer_height = layer_z - self.previous_z
-        self.layer_z = layer_z
-        self.has_only_support = True
-        self.current_layer = []        
+        if layer_z > self.layer_z:
+            if not self.has_only_support:
+                self.previous_layer_height = self.current_layer_height
+                self.previous_z = self.layer_z
+                self.previous_layer = self.current_layer
+                
+            self.current_layer_height = layer_z - self.previous_z
+            self.layer_z = layer_z
+            self.has_only_support = True
+            self.current_layer = []        
 
     def add_line_segment(self, line_segment: LineSegment):
         self.current_layer.append(line_segment)
@@ -192,7 +193,7 @@ def get_speed(target_speed: float, previous_speed: float, slow_speed: float,
     # Slowdown method is automatic
     if 3 * (previous_speed ** 2) + slow_speed ** 2\
             > 4 * previous_speed * slow_speed + acceleration * distance:
-        return 60 * slow_speed
+        return 30 * (slow_speed + previous_speed)
     t_dec = (previous_speed - slow_speed) / acceleration
     d_dec = previous_speed * t_dec - 0.5 * acceleration * (t_dec ** 2)
     d = distance - d_dec
@@ -259,7 +260,10 @@ def process_g_code(input_file: str, minimum_length: float,
                     if match:
                         current_object = match.group(1)
                         if current_object not in list(objects):
+                            #print(f"New object detected: \"{current_object}\"")
                             objects[current_object] = GcodeObject(layer_height, current_z)
+                        else:
+                            objects[current_object].new_layer(current_z)
                         temp_lines.write(line)
                         continue
             
@@ -334,8 +338,7 @@ def process_g_code(input_file: str, minimum_length: float,
                         current_y, width)
                 objects[current_object].add_line_segment(line_segment)
                 
-                if line_type is INTERNAL_INFILL and\
-                        line_segment.length > minimum_length:
+                if line_type is INTERNAL_INFILL:
                     increase_intervals = [[0, 1]]
                     for previous_layer_line in\
                             objects[current_object].previous_layer:
@@ -483,7 +486,15 @@ def process_g_code(input_file: str, minimum_length: float,
                                 f";HEIGHT:{objects[current_object].current_layer_height:.3f}\n"
                         )
                     else:
-                        additional_lines.append(f"G1 F{speed:.3f}\n")
+                        distance = line_segment.length
+                        slowdown_speed = get_speed(
+                                            speed, previous_speed,
+                                            speed_increased_extrusion,
+                                            acceleration, distance,
+                                            slowdown_coefficient,
+                                            slowdown_method
+                        )
+                        additional_lines.append(f"G1 F{slowdown_speed:.3f}\n")
                         additional_lines.append(line)
                 else:
                     additional_lines.append(f"G1 F{speed:.3f}\n")
