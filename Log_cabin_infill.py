@@ -191,6 +191,8 @@ def get_speed(target_speed: float, previous_speed: float, slow_speed: float,
                 + (1 - slowdown_coefficient) * target_speed)
     
     # Slowdown method is automatic
+    if previous_speed >= target_speed:
+        return 59 * target_speed + slow_speed
     if 3 * (previous_speed ** 2) + slow_speed ** 2\
             > 4 * previous_speed * slow_speed + acceleration * distance:
         return 30 * (slow_speed + previous_speed)
