@@ -496,6 +496,7 @@ def process_g_code(input_file: str, minimum_length: float,
                         )
                         additional_lines.append(f"G1 F{slowdown_speed:.3f}\n")
                         additional_lines.append(line)
+                        previous_speed = slowdown_speed
                 else:
                     additional_lines.append(f"G1 F{speed:.3f}\n")
                     additional_lines.append(line)
@@ -516,16 +517,28 @@ def process_g_code(input_file: str, minimum_length: float,
 def preprocess(input_file: str, minimum_length: str, overhang_threshold: str,
         slowdown_speed: str):
     nozzle_diameter = 0.4
+    relative_e = True
     if "SLIC3R_NOZZLE_DIAMETER" in list(os.environ):
         # Multiple extruder support will be added later
         nozzle_diameter =\
                 float(os.environ["SLIC3R_NOZZLE_DIAMETER"].split(',')[0])
+        relative_e = bool(int(os.environ["SLIC3R_USE_RELATIVE_E_DISTANCES"]))
     else:
         with open(input_file, 'r') as input_lines:
+            break_flag_1 = False
+            break_flag_2 = False
             for line in input_lines:
                 match = re.search(r"; nozzle_diameter = ([\.\d]+)", line)
                 if match:
                     nozzle_diameter = float(match.group(1))
+                    break_flag_1 = True
+                
+                match = re.search(r"; use_relative_e_distances = (\d)", line)
+                if match:
+                    relative_e = bool(int(match.group(1)))
+                    break_flag_2 = True
+                    
+                if break_flag_1 and break_flag_2:
                     break
 
     # Ensures the given string is of an allowed form with percentages
@@ -560,7 +573,7 @@ def preprocess(input_file: str, minimum_length: str, overhang_threshold: str,
     elif match_float:
         slowdown_coefficient = float(match_float.group(1))
     
-    return minimum_length, overhang_threshold, slowdown_method,\
+    return relative_e, minimum_length, overhang_threshold, slowdown_method,\
             slowdown_coefficient
 
 
@@ -598,10 +611,12 @@ ACCEL_TO_DECEL algorithm.
 Default value: 0.""")
     args = parser.parse_args()
     
-    minimum_length, overhang_threshold, slowdown_method, slowdown_coefficient\
+    relative_e, minimum_length, overhang_threshold, slowdown_method, slowdown_coefficient\
             = preprocess(args.input_file,
             args.minimum_length, args.overhang_threshold,
             args.slowdown_speed)
-    process_g_code(args.input_file, minimum_length, overhang_threshold,\
-            slowdown_coefficient, slowdown_method)
-    pass
+    if relative_e:
+        process_g_code(args.input_file, minimum_length, overhang_threshold,\
+                slowdown_coefficient, slowdown_method)
+    else:
+        print("Change to relative e distances.")
