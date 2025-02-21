@@ -11,10 +11,10 @@ current layer and the layer before the previous.
 
 This script tries to maintain a constant line width, be it on top of
 solid infill, internal infill, or when variable layer height is used.
-Increasing the infill width will result in varying width in the print.
+Increasing the infill width in the slicer will result in varying width in the print.
 When using rectilinear infill, you might encounter a similar problem as
 when printing grid or triangle infill, the infill might start hitting
-the nozzle.
+the nozzle. Additionally the spacing between infill and internall perimeters becomes to large. The extrudate is unable to bridge the gap as the excess will be pushed down, not sideways, unless supported by the previous layer. This will lead to gaps between the infill and perimeters.
 
 # Parameters
 
@@ -45,6 +45,4 @@ Default value: 0.
 #
 Currently supports only single extruder printers, or it will use the
 nozzle diameter of the first extruder.\
-Tested in SuperSlicer 2.5.59.13 and PrusaSlicer 2.9.0. For some reason
-it won't work with OrcaSlicer, but since OrcaSlicer doesn't provide a
-slicer with a console, I can't read out the error.
+Tested in SuperSlicer 2.5.59.13, PrusaSlicer 2.9.0 and OrcaSlicer 2.2.0-rc.
