@@ -78,7 +78,6 @@ class ScriptConfig:
         match_percent = re.search(r"^(\d*(\.\d+)?)%$", slowdown_speed)
         match_float = re.search(r"^(\d*(\.\d+)?)$", slowdown_speed)
         if slowdown_speed == "-1":
-            # For some reason does not work with OrcaSlicer
             slowdown_method = AUTOMATIC
         elif match_percent:
             slowdown_coefficient = 0.01 * float(match_percent.group(1))
