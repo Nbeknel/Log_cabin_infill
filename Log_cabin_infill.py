@@ -88,7 +88,7 @@ class ScriptConfig:
         # Do not depend on the object.
         self.input_file = args.input_file
         self.relative_e = relative_e
-
+        
         # May depend on the object, therefore need getters and setters.
         self.minimum_length = {"default": minimum_length}
         self.overhang_threshold = {"default": overhang_threshold}
@@ -141,19 +141,23 @@ class ScriptConfig:
                     if object_id is not None:
                         self.objects[object_id] = index
                         self.objects[index] = index
-                    
-                    index += 1
+                        index += 1
                     
                     if line.startswith(";TYPE"):
                         # So as not to read the whole file
                         break
                 else:
-                    match = re.search(r"(\S*Slicer)", line)
+                    match = re.search(r"(\w*Slicer)", line)
                     if match:
                         slicer = match.group(1)
 
     
-    def set_and_get_current_object(self, current_object: str):
+    def set_and_get_current_object(self, current_object):
+        if current_object not in list(self.objects):
+            current_object = re.sub(r"\W+", "_", current_object).strip("_")
+            if current_object not in list(self.objects):
+                input("Something went wrong with object recognition. Press enter to exit.")
+                raise Exception("Something went wrong with object recognition.")
         self.current_object = self.objects[current_object]
         return self.current_object
     
@@ -356,7 +360,7 @@ def get_speed(target_speed: float, previous_speed: float, slow_speed: float,
     if script_config.get_slowdown_method() is SCALAR:
         return 60 * (script_config.get_slowdown_coefficient() * slow_speed\
                 + (1 - script_config.get_slowdown_coefficient()) * target_speed)
-    
+
     # Slowdown method is automatic
     if previous_speed >= target_speed:
         return 59 * target_speed + slow_speed
@@ -406,7 +410,7 @@ def process_g_code(script_config: ScriptConfig):
     
     # Open two files. Read a line from one, modify it if required, and
     # write to the second file.
-    temp_file = re.sub(r"\.+", "_", script_config.input_file) + ".temp"    
+    temp_file = re.sub(r"\.+", "_", script_config.input_file) + ".temp"
     with open(script_config.input_file, 'r') as input_lines,\
             open(temp_file, 'w') as temp_lines:
         for line in input_lines:
@@ -467,6 +471,13 @@ def process_g_code(script_config: ScriptConfig):
             match = re.search(r"M204 [^S\n]*S([\d\.]+)", line)
             if match:
                 acceleration = float(match.group(1))
+                temp_lines.write(line)
+                continue
+            # Get acceleration from SET_VELOCITY_LIMIT (OrcaSlicer)
+            match = re.search(r"ACCEL=([\d\.]+)", line)
+            if match:
+                acceleration = float(match.group(1))
+                temp_lines.write(line)
                 continue
             
             # Get current line width
@@ -659,7 +670,9 @@ def process_g_code(script_config: ScriptConfig):
                         additional_lines.append(line)
                         previous_speed = slowdown_speed
                 else:
-                    additional_lines.append(f"G1 F{speed:.3f}\n")
+                    if abs(previous_speed - speed) > 1e-6:
+                        additional_lines.append(f"G1 F{speed:.3f}\n")
+                        previous_speed = speed
                     additional_lines.append(line)
             else:
                 additional_lines.append(line)
@@ -709,7 +722,7 @@ ACCEL_TO_DECEL algorithm.
 Default value: 0.""")
     
     script_config = ScriptConfig(parser)
-    
+
     if script_config.relative_e:
         process_g_code(script_config)
     else:
