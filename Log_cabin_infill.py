@@ -302,6 +302,7 @@ def process_g_code(input_file: str, minimum_length: float,
             match = re.search(r"M204 [^S\n]*S([\d\.]+)", line)
             if match:
                 acceleration = float(match.group(1))
+                temp_lines.write(line)
                 continue
             
             # Get current line width
@@ -500,7 +501,9 @@ def process_g_code(input_file: str, minimum_length: float,
                         additional_lines.append(line)
                         previous_speed = slowdown_speed
                 else:
-                    additional_lines.append(f"G1 F{speed:.3f}\n")
+                    if abs(previous_speed - speed) > 1e-6:
+                        additional_lines.append(f"G1 F{speed:.3f}\n")
+                        previous_speed = speed
                     additional_lines.append(line)
             else:
                 additional_lines.append(line)
