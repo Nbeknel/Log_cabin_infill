@@ -10,6 +10,177 @@ import math
 SCALAR = False
 AUTOMATIC = True
 
+# Consider this an immutable class that stores all arguments
+class ScriptConfig:
+    def __init__(self, parser: argparse.ArgumentParser):
+        args = parser.parse_args()
+        nozzle_diameter = 0.4
+        relative_e = True
+        gcode_flavor = "marlin2"
+        if "SLIC3R_NOZZLE_DIAMETER" in list(os.environ):
+            # Multiple extruder support will be added later
+            nozzle_diameter =\
+                    float(os.environ["SLIC3R_NOZZLE_DIAMETER"].split(',')[0])
+            relative_e =\
+                    bool(int(os.environ["SLIC3R_USE_RELATIVE_E_DISTANCES"]))
+            gcode_flavor = os.environ["SLIC3R_GCODE_FLAVOR"]
+        else:
+            with open(args.input_file, 'r') as input_lines:
+                break_flags = [False] * 3
+                for line in input_lines:
+                    match = re.search(r"; nozzle_diameter = ([\.\d]+)", line)
+                    if match:
+                        nozzle_diameter = float(match.group(1))
+                        break_flags[0] = True
+                    
+                    match = re.search(r"; use_relative_e_distances = (\d)",
+                            line
+                    )
+                    if match:
+                        relative_e = bool(int(match.group(1)))
+                        break_flags[1] = True
+
+                    match = re.search(r"^; gcode_flavor = (.+)$", line)
+                    if match:
+                        gcode_flavor = match.group(1)
+                        break_flags[2] = True
+
+                    if all(break_flags):
+                        break
+
+        minimum_length = args.minimum_length
+        # Ensures the given string is of an allowed form with percentages
+        # e.g. 50%, 12.5%, 0.45%
+        match_percent = re.search(r"^(\d*(\.\d+)?)%$", minimum_length)
+        match_float = re.search(r"^(\d*(\.\d+)?)$", minimum_length)
+        if match_percent:
+            minimum_length = nozzle_diameter * 0.01\
+                    * float(match_percent.group(1))
+        elif match_float:
+            minimum_length = float(match_float.group(1))
+        else:
+            minimum_length = 0.5 * nozzle_diameter
+
+        overhang_threshold = args.overhang_threshold
+        match_percent = re.search(r"^(\d*(\.\d+)?)%$", overhang_threshold)
+        match_float = re.search(r"^(\d*(\.\d+)?)$", overhang_threshold)
+        if match_percent:
+            overhang_threshold = nozzle_diameter * 0.01\
+                    * float(match_percent.group(1))
+        elif match_float:
+            overhang_threshold = float(match_float.group(1))
+        else:
+            overhang_threshold = 0.5 * nozzle_diameter
+
+        slowdown_speed = args.slowdown_speed
+        slowdown_method = SCALAR
+        slowdown_coefficient = 0
+        match_percent = re.search(r"^(\d*(\.\d+)?)%$", slowdown_speed)
+        match_float = re.search(r"^(\d*(\.\d+)?)$", slowdown_speed)
+        if slowdown_speed == "-1":
+            # For some reason does not work with OrcaSlicer
+            slowdown_method = AUTOMATIC
+        elif match_percent:
+            slowdown_coefficient = 0.01 * float(match_percent.group(1))
+        elif match_float:
+            slowdown_coefficient = float(match_float.group(1))
+        
+        # Do not depend on the object.
+        self.input_file = args.input_file
+        self.relative_e = relative_e
+        
+        # May depend on the object, therefore need getters and setters.
+        self.minimum_length = {"default": minimum_length}
+        self.overhang_threshold = {"default": overhang_threshold}
+        self.slowdown_method = {"default": slowdown_method}
+        self.slowdown_coefficient = {"default": slowdown_coefficient}
+
+        # Get objects from g-code file
+        self.objects = {}
+        with open(args.input_file, 'r') as input_lines:
+            slicer = None
+            previous_line = ""
+            index = 0
+            for line in input_lines:
+                if slicer == "SuperSlicer":
+                    match = re.search(r'"id":"(.*?)"', line)
+                    if match:
+                        object_id = match.group(1)
+                        self.objects[object_id] = index
+                        # https://github.com/kageurufu/preprocess_cancellation/blob/main/preprocess_cancellation.py#L145
+                        object_id_klipper =\
+                                re.sub(r"\W+", "_", object_id).strip("_")
+                        self.objects[object_id_klipper] = index
+                        self.objects[index] = index
+                        # ToDo: object id parsing for per object settings
+                        index += 1
+                    if line.startswith(";TYPE"):
+                        # So as not to read the whole file
+                        break
+                elif slicer == "PrusaSlicer":
+                    if line.startswith("; objects_info"):
+                        object_names = re.findall(r'"name":"(.*?)"', line)
+                        for index, object_name in enumerate(object_names):
+                            self.objects[object_name] = index
+                            object_id_klipper =\
+                                    re.sub(r"\W+", "_", object_name).strip("_")
+                            self.objects[object_id_klipper] = index
+                            self.objects[index] = index
+                            # ToDo: object id parsing for per object settings
+                        break
+                elif slicer == "OrcaSlicer":
+                    object_id = None
+                    match = re.search(r"M486 A(\w+)", line)
+                    if match:
+                        object_id = match.group(1)
+
+                    match = re.search(r"NAME=(\w+)", line)
+                    if match:
+                        object_id = match.group(1)
+                    
+                    if object_id is not None:
+                        self.objects[object_id] = index
+                        self.objects[index] = index
+                        index += 1
+                    
+                    if line.startswith(";TYPE"):
+                        # So as not to read the whole file
+                        break
+                else:
+                    match = re.search(r"(\w*Slicer)", line)
+                    if match:
+                        slicer = match.group(1)
+
+    
+    def set_and_get_current_object(self, current_object):
+        if current_object not in list(self.objects):
+            current_object = re.sub(r"\W+", "_", current_object).strip("_")
+            if current_object not in list(self.objects):
+                input("Something went wrong with object recognition. Press enter to exit.")
+                raise Exception("Something went wrong with object recognition.")
+        self.current_object = self.objects[current_object]
+        return self.current_object
+    
+    def get_minimum_length(self) -> float:
+        if self.current_object in list(self.minimum_length):
+            return self.minimum_length[self.current_object]
+        return self.minimum_length["default"]
+
+    def get_overhang_threshold(self) -> float:
+        if self.current_object in list(self.overhang_threshold):
+            return self.overhang_threshold[self.current_object]
+        return self.overhang_threshold["default"]
+    
+    def get_slowdown_method(self) -> float:
+        if self.current_object in list(self.slowdown_method):
+            return self.slowdown_method[self.current_object]
+        return self.slowdown_method["default"]
+    
+    def get_slowdown_coefficient(self) -> float:
+        if self.current_object in list(self.slowdown_coefficient):
+            return self.slowdown_coefficient[self.current_object]
+        return self.slowdown_coefficient["default"]
+
 
 # An extrusion line is stored as this class. Stores start and end
 # coordinates, extrusion width and length.
@@ -59,7 +230,7 @@ class GcodeObject:
 # interval that is supported relative to the total length based on the
 # widths and intersection angle.
 def intersect(segment_0: LineSegment, segment_1: LineSegment,
-		overhang_threshold):
+		script_config: ScriptConfig):
     epsilon = 1e-6
     # segment_0: in current layer
     # segment_1: in previous layer
@@ -78,7 +249,7 @@ def intersect(segment_0: LineSegment, segment_1: LineSegment,
     dy = segment_1.y0 - segment_0.y0
     
     # If both line segments are (nearly) parallel
-    if abs(delta) < (r0 * r1) * math.sin(math.pi / 180):
+    if abs(delta) < (r0 * r1) * math.sin(math.pi / 36):
         x = 0.5 * (segment_0.x0 + segment_0.x1)
         y = 0.5 * (segment_0.y0 + segment_0.y1)
         n0 = abs(dy1 * (x - segment_1.x0) - dx1 * (y - segment_1.y0)) / r1
@@ -88,7 +259,7 @@ def intersect(segment_0: LineSegment, segment_1: LineSegment,
         normal_distance = min(n0, n1)
         
         # If not supported or barely supported.
-        if normal_distance > overhang_threshold:
+        if normal_distance > script_config.get_overhang_threshold():
             return False
 
         t0 = (dx0 * dx + dy0 * dy) / (r0 ** 2)
@@ -114,7 +285,7 @@ def intersect(segment_0: LineSegment, segment_1: LineSegment,
     # centerlines of an extrusion. By udding a margin value we can find
     # out whether the start or end point is supported by the previous
     # layer.
-    margin = overhang_threshold / r0
+    margin = script_config.get_overhang_threshold() / r0
     
     if -margin <= t0 <= 1 + margin and -margin <= t1 <= 1 + margin:
         return (max(- margin, t0 - half_width / r0),\
@@ -147,11 +318,11 @@ def get_extrusion_multiplier(line: LineSegment, current_layer_height: float,
 # D = U{c in C| |c| >= minimum_length}
 # return D
 def exclude_interval(increase_intervals: list, exclude_interval: tuple,
-        segment_length: float, minimum_length: float) -> list:
+        segment_length: float, script_config: ScriptConfig) -> list:
     new_intervals = []
     start = exclude_interval[0]
     stop = exclude_interval[1]
-    threshold = minimum_length / segment_length
+    threshold = script_config.get_minimum_length() / segment_length
     for interval in increase_intervals:
         if stop <= interval[0]:
             new_intervals.append(interval)
@@ -180,16 +351,16 @@ def exclude_interval(increase_intervals: list, exclude_interval: tuple,
 # with a certain initial speed, target speed and final speed, which is
 # assumed to be the speed when extrusion is increased.
 def get_speed(target_speed: float, previous_speed: float, slow_speed: float,
-        acceleration: float, distance: float, slowdown_coefficient: float,
-        slowdown_method: bool) -> float:
+        acceleration: float, distance: float, script_config: ScriptConfig
+) -> float:
     target_speed /= 60
     previous_speed /= 60
     slow_speed /= 60
     
-    if slowdown_method is SCALAR:
-        return 60 * (slowdown_coefficient * slow_speed\
-                + (1 - slowdown_coefficient) * target_speed)
-    
+    if script_config.get_slowdown_method() is SCALAR:
+        return 60 * (script_config.get_slowdown_coefficient() * slow_speed\
+                + (1 - script_config.get_slowdown_coefficient()) * target_speed)
+
     # Slowdown method is automatic
     if previous_speed >= target_speed:
         return 59 * target_speed + slow_speed
@@ -212,9 +383,7 @@ def get_speed(target_speed: float, previous_speed: float, slow_speed: float,
     return 60 * distance / t_total
 
 
-def process_g_code(input_file: str, minimum_length: float,
-        overhang_threshold: float, slowdown_coefficient: float,
-        slowdown_method: bool):
+def process_g_code(script_config: ScriptConfig):
     internal_infill = ["Internal infill", "Sparse infill"]
     support_material = ["Support material", "Support material interface"]
     OTHER = 0
@@ -241,8 +410,8 @@ def process_g_code(input_file: str, minimum_length: float,
     
     # Open two files. Read a line from one, modify it if required, and
     # write to the second file.
-    temp_file = re.sub(r"\.+", "_", input_file) + ".temp"
-    with open(input_file, 'r') as input_lines,\
+    temp_file = re.sub(r"\.+", "_", script_config.input_file) + ".temp"
+    with open(script_config.input_file, 'r') as input_lines,\
             open(temp_file, 'w') as temp_lines:
         for line in input_lines:
             additional_lines = []
@@ -254,15 +423,15 @@ def process_g_code(input_file: str, minimum_length: float,
             # Match OctoPrint labels
             match_object_start.append(re.search(r"; printing object ([^\n]*)", line))
             # Match Klipper labels
-            match_object_start.append(re.search(r"EXCLUDE_OBJECT_START NAME=([^\n]*)", line))
+            match_object_start.append(re.search(r"EXCLUDE_OBJECT_START NAME='?(\w+)", line))
             # Match Marlin 2 labels
             match_object_start.append(re.search(r"M486 S(\d+)", line))
             if any(match_object_start):
                 for match in match_object_start:
                     if match:
                         current_object = match.group(1)
+                        current_object = script_config.set_and_get_current_object(current_object)
                         if current_object not in list(objects):
-                            #print(f"New object detected: \"{current_object}\"")
                             objects[current_object] = GcodeObject(layer_height, current_z)
                         else:
                             objects[current_object].new_layer(current_z)
@@ -300,6 +469,13 @@ def process_g_code(input_file: str, minimum_length: float,
             
             # Get toolhead acceleration from M204 command
             match = re.search(r"M204 [^S\n]*S([\d\.]+)", line)
+            if match:
+                acceleration = float(match.group(1))
+                temp_lines.write(line)
+                continue
+                
+            # Get acceleration from SET_VELOCITY_LIMIT (OrcaSlicer)
+            match = re.search(r"ACCEL=([\d\.]+)", line)
             if match:
                 acceleration = float(match.group(1))
                 temp_lines.write(line)
@@ -346,11 +522,11 @@ def process_g_code(input_file: str, minimum_length: float,
                     for previous_layer_line in\
                             objects[current_object].previous_layer:
                         intersection = intersect(line_segment,
-                                previous_layer_line, overhang_threshold)
+                                previous_layer_line, script_config)
                         if intersection:
                             increase_intervals = exclude_interval(
                                     increase_intervals, intersection,
-                                    line_segment.length, minimum_length
+                                    line_segment.length, script_config
                             )
                     
                     extrusion_multiplier = get_extrusion_multiplier(
@@ -395,8 +571,7 @@ def process_g_code(input_file: str, minimum_length: float,
                                             speed, previous_speed,
                                             speed_increased_extrusion,
                                             acceleration, distance,
-                                            slowdown_coefficient,
-                                            slowdown_method
+                                            script_config
                                     )
                                     additional_lines.append(
                                             f";HEIGHT:{objects[current_object].current_layer_height:.3f}\n"
@@ -435,8 +610,7 @@ def process_g_code(input_file: str, minimum_length: float,
                                 slowdown_speed = get_speed(
                                         speed, previous_speed,
                                         speed_increased_extrusion,
-                                        acceleration, distance,
-                                        slowdown_coefficient, slowdown_method
+                                        acceleration, distance, script_config
                                 )
                                 additional_lines.append(
                                         f";HEIGHT:{objects[current_object].current_layer_height:.3f}\n"
@@ -470,10 +644,8 @@ def process_g_code(input_file: str, minimum_length: float,
                             distance = (1 - increase_intervals[-1][1])\
                                     * line_segment.length
                             slowdown_speed = get_speed(
-                                    speed, previous_speed,
-                                    speed_increased_extrusion, acceleration,
-                                    distance, slowdown_coefficient,
-                                    slowdown_method
+                                    speed, previous_speed, previous_speed,
+                                    acceleration, distance, script_config
                             )
                             additional_lines.append(
                                     f";HEIGHT:{objects[current_object].current_layer_height:.3f}\n"
@@ -492,10 +664,8 @@ def process_g_code(input_file: str, minimum_length: float,
                         distance = line_segment.length
                         slowdown_speed = get_speed(
                                             speed, previous_speed,
-                                            speed_increased_extrusion,
-                                            acceleration, distance,
-                                            slowdown_coefficient,
-                                            slowdown_method
+                                            previous_speed, acceleration,
+                                            distance, script_config
                         )
                         additional_lines.append(f"G1 F{slowdown_speed:.3f}\n")
                         additional_lines.append(line)
@@ -513,73 +683,10 @@ def process_g_code(input_file: str, minimum_length: float,
     # Copy G-code from the temporary file to the main file, and delete
     # the temporaryfile from the folder.
     with open(temp_file, 'r') as temp_lines,\
-            open(input_file, 'w') as input_lines:
+            open(script_config.input_file, 'w') as input_lines:
         for line in temp_lines:
             input_lines.write(line)
     os.remove(temp_file)
-
-
-def preprocess(input_file: str, minimum_length: str, overhang_threshold: str,
-        slowdown_speed: str):
-    nozzle_diameter = 0.4
-    relative_e = True
-    if "SLIC3R_NOZZLE_DIAMETER" in list(os.environ):
-        # Multiple extruder support will be added later
-        nozzle_diameter =\
-                float(os.environ["SLIC3R_NOZZLE_DIAMETER"].split(',')[0])
-        relative_e = bool(int(os.environ["SLIC3R_USE_RELATIVE_E_DISTANCES"]))
-    else:
-        with open(input_file, 'r') as input_lines:
-            break_flag_1 = False
-            break_flag_2 = False
-            for line in input_lines:
-                match = re.search(r"; nozzle_diameter = ([\.\d]+)", line)
-                if match:
-                    nozzle_diameter = float(match.group(1))
-                    break_flag_1 = True
-                
-                match = re.search(r"; use_relative_e_distances = (\d)", line)
-                if match:
-                    relative_e = bool(int(match.group(1)))
-                    break_flag_2 = True
-                    
-                if break_flag_1 and break_flag_2:
-                    break
-
-    # Ensures the given string is of an allowed form with percentages
-    # e.g. 50%, 12.5%, 0.45%
-    match_percent = re.search(r"^(\d*(\.\d+)?)%$", minimum_length)
-    match_float = re.search(r"^(\d*(\.\d+)?)$", minimum_length)
-    if match_percent:
-        minimum_length = nozzle_diameter * 0.01 * float(match_percent.group(1))
-    elif match_float:
-        minimum_length = float(match_float.group(1))
-    else:
-        minimum_length = 0.5 * nozzle_diameter
-        
-    match_percent = re.search(r"^(\d*(\.\d+)?)%$", overhang_threshold)
-    match_float = re.search(r"^(\d*(\.\d+)?)$", overhang_threshold)
-    if match_percent:
-        overhang_threshold = nozzle_diameter * 0.01\
-                * float(match_percent.group(1))
-    elif match_float:
-        overhang_threshold = float(match_float.group(1))
-    else:
-        overhang_threshold = 0.5 * nozzle_diameter
-    
-    slowdown_method = SCALAR
-    slowdown_coefficient = 0
-    match_percent = re.search(r"^(\d*(\.\d+)?)%$", slowdown_speed)
-    match_float = re.search(r"^(\d*(\.\d+)?)$", slowdown_speed)
-    if slowdown_speed == "-1":
-        slowdown_method = AUTOMATIC
-    elif match_percent:
-        slowdown_coefficient = 0.01 * float(match_percent.group(1))
-    elif match_float:
-        slowdown_coefficient = float(match_float.group(1))
-    
-    return relative_e, minimum_length, overhang_threshold, slowdown_method,\
-            slowdown_coefficient
 
 
 if __name__ == "__main__":
@@ -614,14 +721,10 @@ speed. Can be expressed as a percentage (50% = 0.5). If set to -1, the
 script will create a dynamic slowdown loosely based on Klipper's
 ACCEL_TO_DECEL algorithm.
 Default value: 0.""")
-    args = parser.parse_args()
     
-    relative_e, minimum_length, overhang_threshold, slowdown_method, slowdown_coefficient\
-            = preprocess(args.input_file,
-            args.minimum_length, args.overhang_threshold,
-            args.slowdown_speed)
-    if relative_e:
-        process_g_code(args.input_file, minimum_length, overhang_threshold,\
-                slowdown_coefficient, slowdown_method)
+    script_config = ScriptConfig(parser)
+
+    if script_config.relative_e:
+        process_g_code(script_config)
     else:
         print("Change to relative e distances.")
