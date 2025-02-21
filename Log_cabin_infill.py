@@ -473,6 +473,7 @@ def process_g_code(script_config: ScriptConfig):
                 acceleration = float(match.group(1))
                 temp_lines.write(line)
                 continue
+                
             # Get acceleration from SET_VELOCITY_LIMIT (OrcaSlicer)
             match = re.search(r"ACCEL=([\d\.]+)", line)
             if match:
