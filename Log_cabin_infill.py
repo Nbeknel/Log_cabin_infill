@@ -419,7 +419,42 @@ class GcodeObject:
                             <= 0.55 * (self.grid_diagonal_squared):
                         self.grid_current[i][j].add(line_segment)
     
-    def intervals(self, line_segment: LineSegment) -> list:
+    def intervals(self, line_segment: LineSegment, script_config: ScriptConfig) -> list:
+        increase_intervals = [[0, 1]]
+        if self.bounding_box_origin is not None:
+            grid_start = [
+                    int((line_segment.start[i] - self.bounding_box_origin[i])\
+                    / self.cell_size[i]) for i in [0, 1]
+            ]
+            grid_end = [
+                    int((line_segment.end[i] - self.bounding_box_origin[i])\
+                    / self.cell_size[i]) for i in [0, 1]
+            ]
+            
+            for i in range(min(grid_start[0], grid_end[0]), max(grid_start[0], grid_end[0]) + 1):
+                for j in range(min(grid_start[1], grid_end[1]), max(grid_start[1], grid_end[1]) + 1):
+                    x = self.bounding_box_origin[0] + (i + 0.5) * self.cell_size[0]
+                    y = self.bounding_box_origin[1] + (j + 0.5) * self.cell_size[1]
+                    if line_segment.square_distance_to_point(x, y)\
+                            > 0.55 * (self.grid_diagonal_squared):
+                        continue
+                    for line_segment_previous in self.grid_previous[i][j]:
+                        intersection = intersect(line_segment,
+                                line_segment_previous, script_config)
+                        if intersection:
+                            increase_intervals = exclude_interval(
+                                    increase_intervals, intersection,
+                                    line_segment.length, script_config
+                            )
+        else:
+            for line_segment_previous in self.previous_layer:
+                intersection = intersect(line_segment,
+                        line_segment_previous, script_config)
+                if intersection:
+                    increase_intervals = exclude_interval(
+                            increase_intervals, intersection,
+                            line_segment.length, script_config
+                    )
         return []
 
 
@@ -449,6 +484,7 @@ def get_speed(target_speed: float, previous_speed: float, slow_speed: float,
     target_speed /= 60
     previous_speed /= 60
     slow_speed /= 60
+    acceleration = 0.75 * acceleration
     
     if script_config.get_slowdown_method() is SCALAR:
         return 60 * (script_config.get_slowdown_coefficient() * slow_speed\
