@@ -5,6 +5,7 @@ import argparse
 import os
 import random
 import math
+import time
 
 # Slowdown method
 SCALAR = False
@@ -689,6 +690,7 @@ def process_g_code(script_config: ScriptConfig):
 
 
 if __name__ == "__main__":
+    start_time = time.time()
     parser = argparse.ArgumentParser(description=
 """G-code post-processing script to increase flow of sparse infill lines
 along intervals that are not supported by infill from the previous
@@ -727,3 +729,6 @@ Default value: 0.""")
         process_g_code(script_config)
     else:
         print("Change to relative e distances.")
+    
+    end_time = time.time()
+    print("--- %s ---" % (end_time - start_time))
