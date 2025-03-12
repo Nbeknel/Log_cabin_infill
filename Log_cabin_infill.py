@@ -5,6 +5,7 @@ import argparse
 import os
 import random
 import math
+import time
 
 # Slowdown method
 SCALAR = False
@@ -96,8 +97,6 @@ class ScriptConfig:
 
         # Get objects from g-code file
         self.objects = {}
-        self.bounding_box_origin = {}
-        self.bounding_box_size = {}
         with open(args.input_file, 'r') as input_lines:
             slicer = None
             previous_line = ""
@@ -114,16 +113,6 @@ class ScriptConfig:
                         self.objects[object_id_klipper] = index
                         self.objects[index] = index
                         # ToDo: object id parsing for per object settings
-                        
-                        match = re.search(r'box_center":\[([\d\.]*,[\d\.]*)')
-                        center = [float(m) for m in match.group(1).split(",")]
-                        match = re.search(r'box_size":\[([\d\.]*,[\d\.]*)')
-                        size = [float(m) for m in match.group(1).split(",")]
-                        self.bounding_origin[index] = [
-                                center[i] - 0.5 * size[i] for i in [0, 1]
-                        ]
-                        self.bounding_box_size[index] = size
-                        
                         index += 1
                     if line.startswith(";TYPE"):
                         # So as not to read the whole file
@@ -131,9 +120,6 @@ class ScriptConfig:
                 elif slicer == "PrusaSlicer":
                     if line.startswith("; objects_info"):
                         object_names = re.findall(r'"name":"(.*?)"', line)
-                        object_polygons = re.findall(
-                                r'"polygon":\[((\[[\d\.,]*\],?)*)\]', line
-                        )
                         for index, object_name in enumerate(object_names):
                             self.objects[object_name] = index
                             object_id_klipper =\
@@ -141,19 +127,6 @@ class ScriptConfig:
                             self.objects[object_id_klipper] = index
                             self.objects[index] = index
                             # ToDo: object id parsing for per object settings
-                            
-                            polygon = re.findall(r'([\d.]+)', object_polygons[index])
-                            polygon = [float(coord) for coord in polygon]
-                            polygon_x = polygon[::2]
-                            polygon_x = polygon[1::2]
-                            x_min = min(polygon_x)
-                            x_max = max(polygon_x)
-                            y_min = min(polygon_y)
-                            y_max = max(polygon_y)
-                            
-                            self.bounding_box_origin[index] = [x_min, y_min]
-                            self.bounding_box_size[index] =\
-                                    [x_max - x_min, y_max, y_min]
                         break
                 elif slicer == "OrcaSlicer":
                     object_id = None
@@ -219,29 +192,37 @@ class LineSegment:
         self.x1 = x1
         self.y1 = y1
         self.width = width
+        self.length = math.sqrt((self.x1 - self.x0) ** 2
+                + (self.y1 - self.y0) ** 2)
+
+
+# For each object on the buildplate store all extrusion lines of the
+# previous and current layer, layer heights and current maximum width
+# encountered.
+class GcodeObject:
+    def __init__(self, layer_height=0, layer_z=0):
+        self.previous_layer = []
+        self.current_layer = []
+        self.previous_layer_height = 0
+        self.current_layer_height = layer_height
+        self.layer_z = layer_z
+        self.previous_z = layer_z - layer_height
+        self.has_only_support = True
         
-    @property
-    def square_length(self)
-        return (self.x1 - self.x0) ** 2 + (self.y1 - self.y0) ** 2
-    
-    @property
-    def length(self)
-        return math.sqrt(self.square_length)
-    
-    @property
-    def start(self):
-        return [self.x0, self.y0]
-    
-    @property
-    def end(self):
-        return [self.x1, self.y1]
-        
-    def square_distance_to_point(self, x, y):
-        dx = self.x1 - self.x0
-        dy = self.y1 - self.y0
-        
-        return ((dy * (x - self.x0) - dx * (y - self.y0)) ** 2)\
-                / self.square_length
+    def new_layer(self, layer_z):
+        if layer_z > self.layer_z:
+            if not self.has_only_support:
+                self.previous_layer_height = self.current_layer_height
+                self.previous_z = self.layer_z
+                self.previous_layer = self.current_layer
+                
+            self.current_layer_height = layer_z - self.previous_z
+            self.layer_z = layer_z
+            self.has_only_support = True
+            self.current_layer = []        
+
+    def add_line_segment(self, line_segment: LineSegment):
+        self.current_layer.append(line_segment)
 
 
 # For a line in the current layer, find at which it is supported by line
@@ -312,6 +293,23 @@ def intersect(segment_0: LineSegment, segment_1: LineSegment,
     return False
 
 
+# Calculate the extrusion multiplier for segments that are not
+# supported, by finding the areas of the cross sections of the current
+# layer and previous layer for a given line width, and then dividing
+# their sum by the cross sectional area of the current layer.
+def get_extrusion_multiplier(line: LineSegment, current_layer_height: float,
+        previous_layer_height: float) -> float:
+    alpha = 1 - 0.25 * math.pi
+    current_section = (line.width - alpha * current_layer_height)\
+            * current_layer_height
+    previous_section = (line.width - alpha * previous_layer_height)\
+            * previous_layer_height
+    #rect_section = line.width * (current_layer_height + previous_layer_height)
+    #return 0.5 * (current_section + previous_section + rect_section)\
+    #        / current_section
+    return (current_section + previous_section) / current_section
+
+
 # Find the result of the subtraction of an interval from a union of
 # intervals.
 # `increase_intervals` := A = U{[a_i, b_i]| 0 <= i <= n, b_{i-1} < a_i < b_i < a_{i+1}}
@@ -347,133 +345,7 @@ def exclude_interval(increase_intervals: list, exclude_interval: tuple,
                 new_intervals.append([interval[0], start])
             continue
     return sorted(new_intervals, key=lambda x: x[0])
-
-
-# For each object on the buildplate store all extrusion lines of the
-# previous and current layer, layer heights and current maximum width
-# encountered.
-class GcodeObject:
-    def __init__(self, bounding_box_origin=None, bounding_box_size=None,
-            layer_height=0, layer_z=0):
-        self.previous_layer = []
-        self.current_layer = []
-        self.previous_layer_height = 0
-        self.current_layer_height = layer_height
-        self.layer_z = layer_z
-        self.previous_z = layer_z - layer_height
-        self.has_only_support = True
-        self.bounding_box_origin = bounding_box_origin
-        self.bounding_box_size = self.bounding_box_size
-        
-        if bounding_box_origin is not None:
-            x = int(bounding_box_size[0] / 5)
-            y = int(bounding_box_size[1] / 5)
-            x = 1 if x < 4 else x
-            y = 1 if y < 4 else y
-            self.grid_size = [x, y]
-            self.cell_size =[
-                    bounding_box_size[i] / self.grid_size[i] for i in [0, 1]
-            ]
-            self.grid_diagonal_squared = sum(a ** 2 for a in self.cell_size)
-            self.grid_previous = [[set() for _ in range(y)] for _ in range(x)]
-            self.grid_current = [[set() for _ in range(y)] for _ in range(x)]
-        
-        
-    def new_layer(self, layer_z):
-        if layer_z > self.layer_z:
-            if not self.has_only_support:
-                self.previous_layer_height = self.current_layer_height
-                self.previous_z = self.layer_z
-                self.previous_layer = self.current_layer
-                if self.bounding_box_origin is not None:
-                    self.grid_previous = self.grid_current
-                
-            self.current_layer_height = layer_z - self.previous_z
-            self.layer_z = layer_z
-            self.has_only_support = True
-            self.current_layer = []
-            if self.bounding_box_origin is not None:
-                self.grid_current = [
-                        [set() for _ in range(self.grid_size[1])]\
-                        for _ in range(self.grid_size[0])
-                ]
-            
-
-    def add_line_segment(self, line_segment: LineSegment):
-        self.current_layer.append(line_segment)
-        if self.bounding_box_origin is not None:
-            grid_start = [
-                    int((line_segment.start[i] - self.bounding_box_origin[i])\
-                    / self.cell_size[i]) for i in [0, 1]
-            ]
-            grid_end = [
-                    int((line_segment.end[i] - self.bounding_box_origin[i])\
-                    / self.cell_size[i]) for i in [0, 1]
-            ]
-            
-            for i in range(min(grid_start[0], grid_end[0]), max(grid_start[0], grid_end[0]) + 1):
-                for j in range(min(grid_start[1], grid_end[1]), max(grid_start[1], grid_end[1]) + 1):
-                    x = self.bounding_box_origin[0] + (i + 0.5) * self.cell_size[0]
-                    y = self.bounding_box_origin[1] + (j + 0.5) * self.cell_size[1]
-                    if line_segment.square_distance_to_point(x, y)\
-                            <= 0.55 * (self.grid_diagonal_squared):
-                        self.grid_current[i][j].add(line_segment)
     
-    def intervals(self, line_segment: LineSegment, script_config: ScriptConfig) -> list:
-        increase_intervals = [[0, 1]]
-        if self.bounding_box_origin is not None:
-            grid_start = [
-                    int((line_segment.start[i] - self.bounding_box_origin[i])\
-                    / self.cell_size[i]) for i in [0, 1]
-            ]
-            grid_end = [
-                    int((line_segment.end[i] - self.bounding_box_origin[i])\
-                    / self.cell_size[i]) for i in [0, 1]
-            ]
-            
-            for i in range(min(grid_start[0], grid_end[0]), max(grid_start[0], grid_end[0]) + 1):
-                for j in range(min(grid_start[1], grid_end[1]), max(grid_start[1], grid_end[1]) + 1):
-                    x = self.bounding_box_origin[0] + (i + 0.5) * self.cell_size[0]
-                    y = self.bounding_box_origin[1] + (j + 0.5) * self.cell_size[1]
-                    if line_segment.square_distance_to_point(x, y)\
-                            > 0.55 * (self.grid_diagonal_squared):
-                        continue
-                    for line_segment_previous in self.grid_previous[i][j]:
-                        intersection = intersect(line_segment,
-                                line_segment_previous, script_config)
-                        if intersection:
-                            increase_intervals = exclude_interval(
-                                    increase_intervals, intersection,
-                                    line_segment.length, script_config
-                            )
-        else:
-            for line_segment_previous in self.previous_layer:
-                intersection = intersect(line_segment,
-                        line_segment_previous, script_config)
-                if intersection:
-                    increase_intervals = exclude_interval(
-                            increase_intervals, intersection,
-                            line_segment.length, script_config
-                    )
-        return []
-
-
-# Calculate the extrusion multiplier for segments that are not
-# supported, by finding the areas of the cross sections of the current
-# layer and previous layer for a given line width, and then dividing
-# their sum by the cross sectional area of the current layer.
-def get_extrusion_multiplier(line: LineSegment, current_layer_height: float,
-        previous_layer_height: float) -> float:
-    alpha = 1 - 0.25 * math.pi
-    current_section = (line.width - alpha * current_layer_height)\
-            * current_layer_height
-    previous_section = (line.width - alpha * previous_layer_height)\
-            * previous_layer_height
-    #rect_section = line.width * (current_layer_height + previous_layer_height)
-    #return 0.5 * (current_section + previous_section + rect_section)\
-    #        / current_section
-    return (current_section + previous_section) / current_section
-  
 
 # The automatic method returns the average speed over a given distance
 # with a certain initial speed, target speed and final speed, which is
@@ -484,7 +356,6 @@ def get_speed(target_speed: float, previous_speed: float, slow_speed: float,
     target_speed /= 60
     previous_speed /= 60
     slow_speed /= 60
-    acceleration = 0.75 * acceleration
     
     if script_config.get_slowdown_method() is SCALAR:
         return 60 * (script_config.get_slowdown_coefficient() * slow_speed\
@@ -819,6 +690,7 @@ def process_g_code(script_config: ScriptConfig):
 
 
 if __name__ == "__main__":
+    start_time = time.time()
     parser = argparse.ArgumentParser(description=
 """G-code post-processing script to increase flow of sparse infill lines
 along intervals that are not supported by infill from the previous
@@ -857,3 +729,6 @@ Default value: 0.""")
         process_g_code(script_config)
     else:
         print("Change to relative e distances.")
+    
+    end_time = time.time()
+    print("--- %s ---" % (end_time - start_time))

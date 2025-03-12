@@ -146,7 +146,7 @@ class ScriptConfig:
                             polygon = re.findall(r'([\d.]+)', object_polygons[index])
                             polygon = [float(coord) for coord in polygon]
                             polygon_x = polygon[::2]
-                            polygon_x = polygon[1::2]
+                            polygon_y = polygon[1::2]
                             x_min = min(polygon_x)
                             x_max = max(polygon_x)
                             y_min = min(polygon_y)
@@ -226,14 +226,13 @@ class LineSegment:
         self.x1 = x1
         self.y1 = y1
         self.width = width
-        
-    @property
-    def square_length(self):
-        return (self.x1 - self.x0) ** 2 + (self.y1 - self.y0) ** 2
-    
-    @property
-    def length(self):
-        return math.sqrt(self.square_length)
+
+        self.square_length = (self.x1 - self.x0) ** 2 + (self.y1 - self.y0) ** 2
+        self.length = math.sqrt(self.square_length)
+
+        dx = self.x1 - self.x0
+        dy = self.y1 - self.y0
+        self.unit_vector = [dx / self.length, dx / self.length]
     
     @property
     def start(self):
@@ -244,11 +243,7 @@ class LineSegment:
         return [self.x1, self.y1]
         
     def square_distance_to_point(self, x, y):
-        dx = self.x1 - self.x0
-        dy = self.y1 - self.y0
-        
-        return ((dy * (x - self.x0) - dx * (y - self.y0)) ** 2)\
-                / self.square_length
+        return ((self.unit_vector[1] * (x - self.x0) - self.unit_vector[0] * (y - self.y0)) ** 2)
 
 
 # For a line in the current layer, find at which it is supported by line
@@ -381,9 +376,10 @@ class GcodeObject:
             self.cell_size =[
                     bounding_box_size[i] / self.grid_size[i] for i in [0, 1]
             ]
-            self.grid_diagonal_squared = sum(a ** 2 for a in self.cell_size)
+            self.grid_diagonal_squared = 0.3 * sum(a ** 2 for a in self.cell_size)
             self.grid_previous = [[set() for _ in range(y)] for _ in range(x)]
             self.grid_current = [[set() for _ in range(y)] for _ in range(x)]
+            self.grid_centers = [[((i + 0.5) * self.cell_size[0], (j + 0.5) * self.cell_size[1]) for j in range(y)] for i in range(x)]
         
         
     def new_layer(self, layer_z):
@@ -420,10 +416,9 @@ class GcodeObject:
             
             for i in range(min(grid_start[0], grid_end[0]), max(grid_start[0], grid_end[0]) + 1):
                 for j in range(min(grid_start[1], grid_end[1]), max(grid_start[1], grid_end[1]) + 1):
-                    x = self.bounding_box_origin[0] + (i + 0.5) * self.cell_size[0]
-                    y = self.bounding_box_origin[1] + (j + 0.5) * self.cell_size[1]
+                    x, y = self.grid_centers[i][j]
                     if line_segment.square_distance_to_point(x, y)\
-                            <= 0.55 * (self.grid_diagonal_squared):
+                            <= self.grid_diagonal_squared:
                         self.grid_current[i][j].add(line_segment)
     
     def intervals(self, line_segment: LineSegment, script_config: ScriptConfig) -> list:
@@ -440,10 +435,9 @@ class GcodeObject:
             
             for i in range(min(grid_start[0], grid_end[0]), max(grid_start[0], grid_end[0]) + 1):
                 for j in range(min(grid_start[1], grid_end[1]), max(grid_start[1], grid_end[1]) + 1):
-                    x = self.bounding_box_origin[0] + (i + 0.5) * self.cell_size[0]
-                    y = self.bounding_box_origin[1] + (j + 0.5) * self.cell_size[1]
+                    x, y = self.grid_centers[i][j]
                     if line_segment.square_distance_to_point(x, y)\
-                            > 0.55 * (self.grid_diagonal_squared):
+                            > self.grid_diagonal_squared:
                         continue
                     for line_segment_previous in self.grid_previous[i][j]:
                         intersection = intersect(line_segment,
