@@ -874,7 +874,7 @@ Default value: 0.""")
     elif script_config.fill_density > 0.99:
         print("Lower the fill density.")
     else:
-        process_g_code(script_config)
+        print("Change to relative e distances.")
     
     end_time = time.time()
     print("--- %s ---" % (end_time - start_time))
