@@ -3,7 +3,6 @@
 import re
 import argparse
 import os
-import random
 import math
 import time
 
@@ -874,7 +873,7 @@ Default value: 0.""")
     elif script_config.fill_density > 0.99:
         print("Lower the fill density.")
     else:
-        print("Change to relative e distances.")
+        process_g_code(script_config)
     
     end_time = time.time()
     print("--- %s ---" % (end_time - start_time))
